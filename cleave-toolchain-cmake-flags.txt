@@ -24,14 +24,21 @@ NOFORTRAN=1
 # of a redistributable binary -- one artifact that's fast on whatever CPU
 # it actually runs on, AMD or Intel, not tuned for the build machine alone.
 DYNAMIC_ARCH=ON
-# Shares the same OpenMP runtime/thread pool `cleave`'s own generated code
-# already links against (`--convert-scf-to-openmp`/`--convert-openmp-to-
-# llvm`), rather than OpenBLAS's own separate pthread-based threading model
-# racing it for cores. Genuinely debrayable at runtime, not just at build
-# time -- confirmed directly: `openblas_set_num_threads(1)` takes a real,
-# separate single-threaded code path internally (`level3.c`'s own driver
-# checks the thread count first), not an OpenMP team degenerated to one
-# thread, so a caller can dial per-call between "let it use every core" and
-# "run this one matmul purely sequentially" with no rebuild.
-USE_OPENMP=1
+# `USE_OPENMP=1` used to live here instead, on the theory that sharing
+# `cleave`'s own OpenMP runtime (`--convert-scf-to-openmp`/`--convert-
+# openmp-to-llvm`) beats racing it with a separate pthread pool, plus a
+# claim that `openblas_set_num_threads(1)` takes a real, separate serial
+# code path internally, no OpenMP team involved even at n=1 -- reverted
+# after directly, empirically contradicting both: VTune on a real
+# `cleave`-generated binary (`examples/mnist-interop`, single-threaded,
+# `openblas_set_num_threads(1)` called before every BLAS entry) still
+# showed real time inside `libomp140_x86_64.dll`, and cleave's own
+# parallelization strategy lives one level up, entirely in cleave's own
+# generated code (`--openmp`) -- BLAS is never asked for more than one
+# thread from cleave today, so there is no thread pool left to "share" in
+# the first place. `USE_THREAD=0`: a genuinely serial build, no pthread,
+# no OpenMP, no threading runtime at all to initialize or race against --
+# `openblas_set_num_threads` still links (a real no-op stub in a serial
+# build), so `cleave-rt`'s own unconditional call to it needs no change.
+USE_THREAD=0
 BUILD_SHARED_LIBS=ON
