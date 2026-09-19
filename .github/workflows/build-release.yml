@@ -125,7 +125,7 @@ jobs:
           set -euo pipefail
           stage=stage/openblas-linux-x86_64
           mkdir -p "$stage/lib" "$stage/include"
-          cp build/lib/libopenblas.so* "$stage/lib/"
+          cp -P build/lib/libopenblas.so* "$stage/lib/"
           cp build/generated/*.h "$stage/include/" 2>/dev/null || true
           cp build/openblas_config.h "$stage/include/"
           cp cblas.h "$stage/include/"
