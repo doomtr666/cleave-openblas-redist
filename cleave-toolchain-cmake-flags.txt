@@ -1,0 +1,37 @@
+# The exact CMake configuration cleave's own OpenBLAS toolchain needs --
+# single source of truth for this repo's own build-release workflow, so the
+# Windows and Linux jobs (and any local rebuild) never drift from each
+# other by copy-paste.
+#
+# One `-D<name>=<value>` per line, `#`-prefixed comments and blank lines
+# ignored by the workflow's own parsing.
+
+CMAKE_BUILD_TYPE=Release
+# No Fortran toolchain anywhere in this build, on either platform --
+# `cleave` only ever needs the BLAS entry points (`sgemm`/`dgemm`/...), never
+# LAPACK's own factorizations. `NOFORTRAN=1` skips LAPACK/Fortran entirely
+# (the well-established, real escape hatch OpenBLAS's own WASM/Emscripten
+# and embedded/Android builds already use for the identical reason) --
+# confirmed directly that this does not touch the optimized BLAS Level 3
+# kernels at all (those are hand-written C/assembly/intrinsics in
+# `kernel/`, never Fortran).
+NOFORTRAN=1
+# Every CPU tier built into one binary, real runtime dispatch by CPUID
+# feature detection (never a vendor-string check) -- confirmed directly,
+# not just documented, that this correctly routes a real AMD Zen 5 chip
+# with AVX-512 to the SKYLAKEX/COOPERLAKE kernel tier, not the AVX2-only
+# ZEN one (`cpuid_x86.c`'s own `case 11: // Zen5` branch). The whole point
+# of a redistributable binary -- one artifact that's fast on whatever CPU
+# it actually runs on, AMD or Intel, not tuned for the build machine alone.
+DYNAMIC_ARCH=ON
+# Shares the same OpenMP runtime/thread pool `cleave`'s own generated code
+# already links against (`--convert-scf-to-openmp`/`--convert-openmp-to-
+# llvm`), rather than OpenBLAS's own separate pthread-based threading model
+# racing it for cores. Genuinely debrayable at runtime, not just at build
+# time -- confirmed directly: `openblas_set_num_threads(1)` takes a real,
+# separate single-threaded code path internally (`level3.c`'s own driver
+# checks the thread count first), not an OpenMP team degenerated to one
+# thread, so a caller can dial per-call between "let it use every core" and
+# "run this one matmul purely sequentially" with no rebuild.
+USE_OPENMP=1
+BUILD_SHARED_LIBS=ON

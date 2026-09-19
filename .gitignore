@@ -118,3 +118,9 @@ CMakeCache.txt
 CMakeFiles/*
 .vscode
 **/__pycache__
+
+# cleave's own build artifacts
+/build/
+bench_sgemm.exe
+openblas.dll
+

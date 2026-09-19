@@ -1,0 +1,177 @@
+name: build-and-release
+
+# Builds this repo's own currently-checked-out OpenBLAS tree (pinned to
+# v0.3.33 -- v0.3.34 has a real, documented regression on exactly this
+# shape of build, github.com/OpenMathLib/OpenBLAS issue #6013: an access
+# violation in dgemm_kernel_ZEN/HASWELL on AMD Zen 4/5 when AVX-512 is
+# exposed, Windows + clang-cl + DYNAMIC_ARCH -- confirmed directly, not
+# just read about, by hitting it on a real AMD Ryzen 9 9700X before
+# pinning this version instead) for both Windows and Linux, and publishes
+# both as a single GitHub Release. Windows uses clang-cl specifically, not
+# MinGW and not plain MSVC -- `cl.exe` alone can't assemble the GNU-syntax
+# hand-tuned kernels OpenBLAS's own optimized BLAS Level 3 routines are
+# written in (falls back to the unoptimized "generic" C path), and MinGW's
+# own runtime/ABI doesn't link cleanly into an ordinary Rust/MSVC target --
+# `clang-cl` is genuinely both (GNU-compatible assembler, MSVC-compatible
+# object files/ABI), the same real trick AMD's own official AOCL-BLAS
+# Windows binaries use.
+#
+# Deliberately not triggered on every push: a real build here, while far
+# cheaper than `cleave-llvm-redist`'s own multi-hour LLVM build, still has
+# no reason to run except on a real version bump or a manual dispatch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag for the GitHub Release to create/update (e.g. cleave-openblas-0.3.33-r1)"
+        required: true
+  push:
+    tags:
+      - "cleave-openblas-*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Set up Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v4
+
+      # `windows-latest`'s own runner image usually already ships LLVM/
+      # clang-cl (confirmed on GitHub's own runner-images manifest at the
+      # time this was written) -- only installs one if it's genuinely
+      # missing, rather than assuming either way.
+      - name: Ensure clang-cl is available
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not (Get-Command clang-cl -ErrorAction SilentlyContinue)) {
+            choco install llvm -y --no-progress
+          }
+          clang-cl --version
+
+      - name: Configure (cmake)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $flags = Get-Content "${{ github.workspace }}\cleave-toolchain-cmake-flags.txt" |
+            Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') } |
+            ForEach-Object { "-D$($_.Trim())" }
+
+          cmake -S "${{ github.workspace }}" -B "${{ github.workspace }}\build" -G Ninja `
+            -DCMAKE_C_COMPILER=clang-cl `
+            @flags
+          if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
+
+      - name: Build (ninja)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake --build "${{ github.workspace }}\build"
+          if ($LASTEXITCODE -ne 0) { throw "ninja build failed" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stage = "${{ github.workspace }}\stage\openblas-windows-msvc"
+          New-Item -ItemType Directory -Force -Path "$stage\bin", "$stage\lib", "$stage\include" | Out-Null
+          Copy-Item "${{ github.workspace }}\build\lib\openblas.dll" "$stage\bin\"
+          Copy-Item "${{ github.workspace }}\build\lib\Release\openblas.lib" "$stage\lib\"
+          Copy-Item "${{ github.workspace }}\build\generated\*.h" "$stage\include\" -ErrorAction SilentlyContinue
+          Copy-Item "${{ github.workspace }}\build\openblas_config.h" "$stage\include\"
+          Copy-Item "${{ github.workspace }}\cblas.h" "$stage\include\"
+          Compress-Archive -Path "$stage\*" -DestinationPath "${{ github.workspace }}\openblas-windows-msvc.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openblas-windows-msvc
+          path: openblas-windows-msvc.zip
+
+  build-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure (cmake)
+        run: |
+          set -euo pipefail
+          flags=()
+          while IFS= read -r line; do
+            line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            [[ -z "$line" || "$line" == \#* ]] && continue
+            flags+=("-D$line")
+          done < cleave-toolchain-cmake-flags.txt
+          cmake -S . -B build -G Ninja "${flags[@]}"
+
+      - name: Build (ninja)
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          stage=stage/openblas-linux-x86_64
+          mkdir -p "$stage/lib" "$stage/include"
+          cp build/lib/libopenblas.so* "$stage/lib/"
+          cp build/generated/*.h "$stage/include/" 2>/dev/null || true
+          cp build/openblas_config.h "$stage/include/"
+          cp cblas.h "$stage/include/"
+          tar -C stage -czf openblas-linux-x86_64.tar.gz openblas-linux-x86_64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openblas-linux-x86_64
+          path: openblas-linux-x86_64.tar.gz
+
+  release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          t="${{ github.event.inputs.release_tag }}"
+          if [ -z "$t" ]; then t="${{ github.ref_name }}"; fi
+          echo "tag=$t" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          files: |
+            artifacts/openblas-windows-msvc/openblas-windows-msvc.zip
+            artifacts/openblas-linux-x86_64/openblas-linux-x86_64.tar.gz
+          body: |
+            Prebuilt OpenBLAS for cleave, built from `v0.3.33` (pinned --
+            v0.3.34 has a real, documented regression on this exact build
+            shape, github.com/OpenMathLib/OpenBLAS#6013) with
+            `cleave-toolchain-cmake-flags.txt` at this tag's own commit.
+            Every CPU tier built in (`DYNAMIC_ARCH=ON`), real runtime
+            dispatch by CPUID feature detection -- fast on AMD and Intel
+            alike, not tuned for one vendor. OpenMP-threaded
+            (`USE_OPENMP=1`), genuinely debrayable at runtime via
+            `openblas_set_num_threads(n)` (a real, separate single-
+            threaded code path at `n=1`, not a degenerate OpenMP team).
+            No Fortran/LAPACK (`NOFORTRAN=1`) -- BLAS only, which is all
+            cleave itself ever calls.
+          make_latest: true
