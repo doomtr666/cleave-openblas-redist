@@ -41,4 +41,13 @@ DYNAMIC_ARCH=ON
 # `openblas_set_num_threads` still links (a real no-op stub in a serial
 # build), so `cleave-rt`'s own unconditional call to it needs no change.
 USE_THREAD=0
+# Serial, but called from several threads at once: cleave's `spawn` tasks
+# (cleave's `doc/plan-spawn.md`) each run their own `sgemm`, BLAS staying
+# single-threaded below that grain. Without this, a serial build's buffer
+# allocator (`driver/others/memory.c`, every lock under `SMP || USE_LOCKING`)
+# is unguarded: two concurrent calls can be handed the same packing buffer.
+# A lock taken briefly per buffer acquire/release, once per call, nothing on
+# a single thread's speed. (`USE_TLS`, per-thread buffers, would avoid even
+# that, but requires a threaded `SMP` build.)
+USE_LOCKING=ON
 BUILD_SHARED_LIBS=ON

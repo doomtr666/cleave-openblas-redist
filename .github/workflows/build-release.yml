@@ -168,10 +168,10 @@ jobs:
             `cleave-toolchain-cmake-flags.txt` at this tag's own commit.
             Every CPU tier built in (`DYNAMIC_ARCH=ON`), real runtime
             dispatch by CPUID feature detection -- fast on AMD and Intel
-            alike, not tuned for one vendor. OpenMP-threaded
-            (`USE_OPENMP=1`), genuinely debrayable at runtime via
-            `openblas_set_num_threads(n)` (a real, separate single-
-            threaded code path at `n=1`, not a degenerate OpenMP team).
+            alike, not tuned for one vendor. Serial (`USE_THREAD=0`, no
+            threading runtime at all) and safe to call from several
+            threads at once (`USE_LOCKING=ON`): cleave parallelizes above
+            the BLAS grain, each task running its own single-threaded call.
             No Fortran/LAPACK (`NOFORTRAN=1`) -- BLAS only, which is all
             cleave itself ever calls.
           make_latest: true
