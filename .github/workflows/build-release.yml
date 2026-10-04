@@ -75,11 +75,18 @@ jobs:
 
           # OpenMP from cleave's `libomp`, spelled out: CMake's `FindOpenMP`
           # would otherwise settle on MSVC's `vcomp` with clang-cl.
+          # Clang 22 makes `-Wincompatible-pointer-types` an error by default:
+          # two AVX-512 microkernels (`kernel/x86_64/c{,a}sum_microk_skylakex-2.c`)
+          # hand `_mm_prefetch` a `float *` where clang-cl's declaration takes a
+          # `const char *` -- harmless, back to a warning. And no warnings at all
+          # (`/w`): OpenBLAS's `-Wall` is clang-cl's `-Weverything`, hundreds of
+          # megabytes of log for a third-party build.
           cmake -S "${{ github.workspace }}" -B "${{ github.workspace }}\build" -G Ninja `
             -DCMAKE_C_COMPILER="$env:CLEAVE_LLVM\bin\clang-cl.exe" `
             "-DOpenMP_C_FLAGS=-Xclang -fopenmp" `
             -DOpenMP_C_LIB_NAMES=libomp `
             "-DOpenMP_libomp_LIBRARY=$env:CLEAVE_LLVM\lib\libomp.lib" `
+            "-DCMAKE_C_FLAGS=/w -Wno-error=incompatible-pointer-types" `
             @flags
           if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
 
