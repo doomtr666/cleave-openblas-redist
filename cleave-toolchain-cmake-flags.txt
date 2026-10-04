@@ -24,30 +24,19 @@ NOFORTRAN=1
 # of a redistributable binary -- one artifact that's fast on whatever CPU
 # it actually runs on, AMD or Intel, not tuned for the build machine alone.
 DYNAMIC_ARCH=ON
-# `USE_OPENMP=1` used to live here instead, on the theory that sharing
-# `cleave`'s own OpenMP runtime (`--convert-scf-to-openmp`/`--convert-
-# openmp-to-llvm`) beats racing it with a separate pthread pool, plus a
-# claim that `openblas_set_num_threads(1)` takes a real, separate serial
-# code path internally, no OpenMP team involved even at n=1 -- reverted
-# after directly, empirically contradicting both: VTune on a real
-# `cleave`-generated binary (`examples/mnist-interop`, single-threaded,
-# `openblas_set_num_threads(1)` called before every BLAS entry) still
-# showed real time inside `libomp140_x86_64.dll`, and cleave's own
-# parallelization strategy lives one level up, entirely in cleave's own
-# generated code (`--openmp`) -- BLAS is never asked for more than one
-# thread from cleave today, so there is no thread pool left to "share" in
-# the first place. `USE_THREAD=0`: a genuinely serial build, no pthread,
-# no OpenMP, no threading runtime at all to initialize or race against --
-# `openblas_set_num_threads` still links (a real no-op stub in a serial
-# build), so `cleave-rt`'s own unconditional call to it needs no change.
-USE_THREAD=0
-# Serial, but called from several threads at once: cleave's `spawn` tasks
-# (cleave's `doc/plan-spawn.md`) each run their own `sgemm`, BLAS staying
-# single-threaded below that grain. Without this, a serial build's buffer
-# allocator (`driver/others/memory.c`, every lock under `SMP || USE_LOCKING`)
-# is unguarded: two concurrent calls can be handed the same packing buffer.
-# A lock taken briefly per buffer acquire/release, once per call, nothing on
-# a single thread's speed. (`USE_TLS`, per-thread buffers, would avoid even
-# that, but requires a threaded `SMP` build.)
-USE_LOCKING=ON
+# Threaded on OpenMP, and on *cleave's own* OpenMP runtime: the Windows build
+# compiles with the clang-cl of cleave's LLVM release and links its `libomp`
+# (`.github/workflows/build-release.yml`, `cleave-llvm-toolchain.txt`), the
+# runtime cleave's `spawn` tasks run on — one thread pool in the process, not
+# two racing each other. The first OpenMP build (r1) picked up MSVC's runtime
+# instead, the reason it was dropped for a serial one. Called from inside a
+# parallel region (a cleave task), OpenBLAS runs single-threaded on its own;
+# from outside one, it splits a GEMM over the threads (`openblas_set_num_threads`).
+# Thread-safe by construction, so `USE_LOCKING` (r3) isn't needed any more.
+USE_OPENMP=1
+# The most threads it will ever run (`MAX_CPU_NUMBER`), fixed at build time:
+# left unset it is the *build machine's* core count -- a 4-core CI runner --
+# whatever the machine it runs on. Sized for big many-core boxes; per-thread
+# buffers are only allocated for the threads actually used.
+NUM_THREADS=256
 BUILD_SHARED_LIBS=ON

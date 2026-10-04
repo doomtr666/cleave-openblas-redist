@@ -47,18 +47,23 @@ jobs:
       - name: Set up Ninja
         uses: seanmiddleditch/gha-setup-ninja@v4
 
-      # `windows-latest`'s own runner image usually already ships LLVM/
-      # clang-cl (confirmed on GitHub's own runner-images manifest at the
-      # time this was written) -- only installs one if it's genuinely
-      # missing, rather than assuming either way.
-      - name: Ensure clang-cl is available
+      # cleave's own LLVM release (`cleave-llvm-redist`, the tag in
+      # `cleave-llvm-toolchain.txt`, the same cleave builds with): its clang-cl
+      # compiles OpenBLAS and its `libomp` is the OpenMP runtime OpenBLAS links,
+      # the one cleave's tasks run on.
+      - name: Fetch cleave's LLVM toolchain
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if (-not (Get-Command clang-cl -ErrorAction SilentlyContinue)) {
-            choco install llvm -y --no-progress
-          }
-          clang-cl --version
+          $tag = (Get-Content "${{ github.workspace }}\cleave-llvm-toolchain.txt" | Select-Object -First 1).Trim()
+          $url = "https://github.com/doomtr666/cleave-llvm-redist/releases/download/$tag/llvm-mlir-22-windows-msvc.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "llvm.zip"
+          $dir = Join-Path $env:RUNNER_TEMP "llvm"
+          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          $root = (Get-ChildItem -Path $dir -Recurse -Filter clang-cl.exe | Select-Object -First 1).Directory.Parent.FullName
+          "CLEAVE_LLVM=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          & "$root\bin\clang-cl.exe" --version
 
       - name: Configure (cmake)
         shell: pwsh
@@ -68,8 +73,13 @@ jobs:
             Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') } |
             ForEach-Object { "-D$($_.Trim())" }
 
+          # OpenMP from cleave's `libomp`, spelled out: CMake's `FindOpenMP`
+          # would otherwise settle on MSVC's `vcomp` with clang-cl.
           cmake -S "${{ github.workspace }}" -B "${{ github.workspace }}\build" -G Ninja `
-            -DCMAKE_C_COMPILER=clang-cl `
+            -DCMAKE_C_COMPILER="$env:CLEAVE_LLVM\bin\clang-cl.exe" `
+            "-DOpenMP_C_FLAGS=-Xclang -fopenmp" `
+            -DOpenMP_C_LIB_NAMES=libomp `
+            "-DOpenMP_libomp_LIBRARY=$env:CLEAVE_LLVM\lib\libomp.lib" `
             @flags
           if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
 
@@ -87,6 +97,9 @@ jobs:
           $stage = "${{ github.workspace }}\stage\openblas-windows-msvc"
           New-Item -ItemType Directory -Force -Path "$stage\bin", "$stage\lib", "$stage\include" | Out-Null
           Copy-Item "${{ github.workspace }}\build\lib\openblas.dll" "$stage\bin\"
+          # Its OpenMP runtime, found next to it when the process hasn't loaded
+          # cleave's own `libomp.dll` yet (same release, same file).
+          Copy-Item "$env:CLEAVE_LLVM\bin\libomp.dll" "$stage\bin\"
           Copy-Item "${{ github.workspace }}\build\lib\Release\openblas.lib" "$stage\lib\"
           Copy-Item "${{ github.workspace }}\build\generated\*.h" "$stage\include\" -ErrorAction SilentlyContinue
           Copy-Item "${{ github.workspace }}\build\openblas_config.h" "$stage\include\"
@@ -168,10 +181,12 @@ jobs:
             `cleave-toolchain-cmake-flags.txt` at this tag's own commit.
             Every CPU tier built in (`DYNAMIC_ARCH=ON`), real runtime
             dispatch by CPUID feature detection -- fast on AMD and Intel
-            alike, not tuned for one vendor. Serial (`USE_THREAD=0`, no
-            threading runtime at all) and safe to call from several
-            threads at once (`USE_LOCKING=ON`): cleave parallelizes above
-            the BLAS grain, each task running its own single-threaded call.
+            alike, not tuned for one vendor. Threaded on OpenMP
+            (`USE_OPENMP=1`), built with the clang-cl of cleave's LLVM
+            release and linked to its `libomp` (shipped next to
+            `openblas.dll`): the runtime cleave's tasks run on, one thread
+            pool per process. Single-threaded when called from a cleave task,
+            split over the threads otherwise.
             No Fortran/LAPACK (`NOFORTRAN=1`) -- BLAS only, which is all
             cleave itself ever calls.
           make_latest: true
